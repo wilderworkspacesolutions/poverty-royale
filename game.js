@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 // ---------- Rules and tuning ----------
 const MAX_PLAYERS = 50;
@@ -207,7 +209,68 @@ const SUIT_RICH = new THREE.Color(0xd4af37);
 const figures = new Map();   // entity id -> figure
 const pileMeshes = new Map(); // pile id -> mesh
 
+// The Blender goblin (assets/avatar.glb). Falls back to box figures if it hasn't loaded yet.
+let template = null;
+new GLTFLoader().load('assets/avatar.glb', (g) => { template = g; }, undefined, () => {});
+
+function makeTag() {
+  const tag = document.createElement('div');
+  tag.className = 'tag';
+  $('labels').appendChild(tag);
+  return tag;
+}
+
 function makeFigure() {
+  if (!template) return makePrimitiveFigure();
+  const group = new THREE.Group();
+  const model = SkeletonUtils.clone(template.scene);
+  model.rotation.y = Math.PI;   // the export faces +Z; the game faces -Z
+  let suit = null;
+  model.traverse((o) => {
+    if (!o.isMesh) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    const own = mats.map((m) => m.clone());
+    for (const m of own) if (m.name === 'Suit') suit = m;
+    o.material = Array.isArray(o.material) ? own : own[0];
+  });
+  group.add(model);
+
+  const crown = new THREE.Mesh(
+    new THREE.ConeGeometry(0.22, 0.3, 5),
+    new THREE.MeshStandardMaterial({ color: 0xffd24a, emissive: 0x806000 }),
+  );
+  crown.position.y = 2.0;
+  group.add(crown);
+  scene.add(group);
+
+  const mixer = new THREE.AnimationMixer(model);
+  const actions = {};
+  for (const clip of template.animations) actions[clip.name] = mixer.clipAction(clip);
+  actions.idle.play();
+
+  return {
+    group, mat: suit || new THREE.MeshStandardMaterial(), gun: null, crown, tag: makeTag(), ent: null,
+    mixer, actions, state: 'idle', lx: 0, lz: 0,
+  };
+}
+
+// Walk while moving, idle otherwise, die when dead
+function updateAnim(f, x, z, dt, alive) {
+  const moved = Math.hypot(x - f.lx, z - f.lz) > 0.002;
+  f.lx = x;
+  f.lz = z;
+  const want = !alive ? 'die' : moved ? 'walk' : 'idle';
+  if (want !== f.state) {
+    const next = f.actions[want];
+    const prev = f.actions[f.state];
+    next.reset().play();
+    if (prev) prev.crossFadeTo(next, 0.2, false);
+    f.state = want;
+  }
+  f.mixer.update(dt);
+}
+
+function makePrimitiveFigure() {
   const group = new THREE.Group();
   const mat = new THREE.MeshStandardMaterial({ color: SUIT_POOR.clone(), roughness: 0.55 });
   const part = (geo, y) => {
@@ -1138,6 +1201,7 @@ function renderFigures(dt) {
       f.group.position.z += (z - f.group.position.z) * k;
     }
     f.group.rotation.y = yaw;
+    if (f.mixer) updateAnim(f, f.group.position.x, f.group.position.z, dt, e.alive);
 
     // Richer players read as brighter and bigger
     const rich = Math.min(1, e.cash / 8000);
@@ -1145,8 +1209,10 @@ function renderFigures(dt) {
     f.mat.emissive.setRGB(rich * 0.35, rich * 0.28, 0);
     f.group.scale.setScalar(1 + rich * 0.08);
     f.crown.visible = e.cash >= CROWN_CASH;
-    f.gun.visible = e.tier >= 0;
-    if (e.tier >= 0) f.gun.material.color.setHex(TIERS[e.tier].color);
+    if (f.gun) {
+      f.gun.visible = e.tier >= 0;
+      if (e.tier >= 0) f.gun.material.color.setHex(TIERS[e.tier].color);
+    }
 
     if (isMe) {
       f.tag.style.display = 'none';
