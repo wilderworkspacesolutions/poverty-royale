@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Poverty Royale</title>
+<style>
+  :root { --gold: #d4af37; --ink: #0d0d0f; --paper: #f1ece0; }
+  html, body { margin: 0; height: 100%; background: var(--ink); color: var(--paper); font-family: system-ui, sans-serif; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  .hidden { display: none !important; }
+
+  /* Lobby */
+  #lobby { position: fixed; inset: 0; background: rgba(13,13,15,0.9); display: flex; align-items: center; justify-content: center; padding: 16px; box-sizing: border-box; }
+  .panel { width: min(420px, 100%); background: #17171b; border: 1px solid #2c2c33; border-radius: 10px; padding: 24px; box-sizing: border-box; }
+  h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: 4px; text-transform: uppercase; }
+  h1 span { color: var(--gold); }
+  .sub { margin: 0 0 20px; font-size: 13px; opacity: 0.6; letter-spacing: 1px; }
+  label { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; opacity: 0.7; margin: 14px 0 6px; }
+  input, select, button { font: inherit; border-radius: 6px; border: 1px solid #3a3a42; padding: 10px 12px; box-sizing: border-box; }
+  input, select { width: 100%; background: #0d0d0f; color: var(--paper); }
+  button { background: var(--gold); color: #111; border-color: var(--gold); font-weight: 700; cursor: pointer; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.ghost { background: transparent; color: var(--paper); border-color: #3a3a42; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  #code { font-size: 26px; letter-spacing: 6px; color: var(--gold); margin: 8px 0; min-height: 32px; }
+  #status { font-size: 13px; min-height: 18px; margin-top: 12px; opacity: 0.8; }
+  #players { font-size: 13px; margin: 8px 0 0; padding-left: 18px; max-height: 120px; overflow: auto; }
+  .hr { border: 0; border-top: 1px solid #2c2c33; margin: 18px 0 0; }
+
+  /* HUD */
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  .corner { position: absolute; background: rgba(13,13,15,0.6); border: 1px solid #2c2c33; border-radius: 8px; padding: 10px 14px; font-size: 14px; }
+  #tl { top: 12px; left: 12px; }
+  #tl .mode { color: var(--gold); text-transform: uppercase; letter-spacing: 2px; font-size: 12px; }
+  #tl .big { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  #bl { bottom: 12px; left: 12px; width: min(340px, calc(100% - 24px)); }
+  #cash { font-size: 26px; font-weight: 800; color: var(--gold); }
+  .bar { height: 8px; background: #2c2c33; border-radius: 4px; margin: 8px 0; overflow: hidden; }
+  #hud-hp { height: 100%; width: 100%; background: #c94a3a; }
+  #tr { top: 12px; right: 12px; width: min(300px, calc(100% - 24px)); font-size: 12px; }
+  #feed div { margin-top: 4px; opacity: 0.85; }
+  #hud-seen { margin-top: 6px; color: #9fc7ff; }
+  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+  #crosshair::before, #crosshair::after { content: ''; position: absolute; background: var(--paper); opacity: 0.8; }
+  #crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  #crosshair::after { top: 10px; left: 0; height: 2px; width: 22px; }
+  #hitmark { position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 2px solid #ff5a4a; border-radius: 50%; opacity: 0; transition: opacity 0.15s; }
+  #hitmark.on { opacity: 1; }
+  #prompt { position: absolute; left: 50%; top: 62%; transform: translateX(-50%); background: rgba(13,13,15,0.75); padding: 8px 14px; border-radius: 6px; border: 1px solid var(--gold); font-size: 14px; white-space: nowrap; }
+  #dead { position: absolute; left: 50%; top: 30%; transform: translateX(-50%); font-size: 22px; letter-spacing: 3px; text-transform: uppercase; color: #ff7b6b; text-shadow: 0 2px 8px #000; }
+  #note { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%); background: rgba(13,13,15,0.85); padding: 8px 14px; border-radius: 6px; font-size: 14px; opacity: 0; transition: opacity 0.3s; white-space: nowrap; }
+  #note.on { opacity: 1; }
+  #labels { position: fixed; inset: 0; pointer-events: none; overflow: hidden; }
+  .tag { position: absolute; left: 0; top: 0; font-size: 12px; white-space: nowrap; color: var(--paper); background: rgba(13,13,15,0.7); padding: 2px 6px; border-radius: 4px; border: 1px solid #3a3a42; display: none; }
+
+  /* Game over */
+  #over { position: fixed; inset: 0; background: rgba(13,13,15,0.85); display: flex; align-items: center; justify-content: center; }
+  #over .panel { text-align: center; }
+  #over-text { font-size: 22px; margin: 10px 0 20px; color: var(--gold); }
+
+  @media (max-width: 600px) {
+    #tr { top: auto; bottom: 12px; right: 12px; left: auto; width: calc(100% - 370px); }
+    #bl { width: calc(100% - 24px); }
+    #tr { display: none; }
+  }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+</script>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="labels"></div>
+
+<div id="lobby">
+  <div class="panel">
+    <h1>Poverty <span>Royale</span></h1>
+    <p class="sub">You can only see the richer ones.</p>
+
+    <label for="name">Your name</label>
+    <input id="name" maxlength="16" placeholder="Player" autocomplete="off">
+
+    <div class="row" style="margin-top:18px">
+      <button id="host-btn">Host a match</button>
+    </div>
+    <div id="host-box" class="hidden">
+      <label>Room code</label>
+      <div id="code"></div>
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="br">Battle Royale (permadeath, last alive wins)</option>
+        <option value="koth">King of the Hill (10 min, richest alive wins)</option>
+      </select>
+      <div class="row" style="margin-top:14px">
+        <button id="start-btn" disabled>Start match</button>
+      </div>
+    </div>
+
+    <hr class="hr">
+
+    <label for="join-code">Join with room code</label>
+    <div class="row">
+      <input id="join-code" maxlength="5" placeholder="ABCDE" autocomplete="off" style="text-transform:uppercase">
+      <button id="join-btn" class="ghost" style="flex:0 0 auto">Join</button>
+    </div>
+
+    <div id="status"></div>
+    <ul id="players" class="hidden"></ul>
+  </div>
+</div>
+
+<div id="hud" class="hidden">
+  <div id="tl" class="corner">
+    <div class="mode" id="hud-mode"></div>
+    <div class="big" id="hud-time"></div>
+    <div id="hud-alive" style="opacity:0.7;font-size:12px"></div>
+  </div>
+  <div id="bl" class="corner">
+    <div id="cash">$0</div>
+    <div class="bar"><div id="hud-hp"></div></div>
+    <div id="hud-weapon"></div>
+  </div>
+  <div id="tr" class="corner">
+    <div id="hud-seen"></div>
+    <div id="feed"></div>
+  </div>
+  <div id="crosshair"></div>
+  <div id="hitmark"></div>
+  <div id="prompt" class="hidden"></div>
+  <div id="dead" class="hidden"></div>
+  <div id="note"></div>
+</div>
+
+<div id="over" class="hidden">
+  <div class="panel">
+    <h1>Game <span>over</span></h1>
+    <div id="over-text"></div>
+    <button id="again-btn">Back to lobby</button>
+  </div>
+</div>
+
+<script type="module" src="game.js"></script>
+</body>
+</html>
