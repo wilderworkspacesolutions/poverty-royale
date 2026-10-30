@@ -196,7 +196,10 @@ function makeFigure() {
   };
   part(new THREE.BoxGeometry(0.5, 0.9, 0.4), 0.45);
   part(new THREE.BoxGeometry(0.75, 0.9, 0.45), 1.35);
-  part(new THREE.SphereGeometry(0.25, 16, 12), 1.9);
+  // Goblin head: green skin, separate from the suit so the suit still shifts with cash
+  const skin = new THREE.Mesh(new THREE.SphereGeometry(0.25, 16, 12), new THREE.MeshStandardMaterial({ color: 0x7fae3a, roughness: 0.6 }));
+  skin.position.y = 1.9;
+  group.add(skin);
   const gun = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.16, 0.7), new THREE.MeshStandardMaterial({ color: 0x444444 }));
   gun.position.set(0.35, 1.3, -0.35);
   group.add(gun);
