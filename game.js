@@ -24,6 +24,27 @@ const TIERS = [
   { name: 'Assault Rifle',  price: 6000,  dmg: 20, range: 70,  cd: 0.11, spread: 0.045, pellets: 1, color: 0x6fb3ff },
   { name: 'Sniper',         price: 10000, dmg: 95, range: 200, cd: 1.6,  spread: 0.004, pellets: 1, color: 0xffd24a },
 ];
+// Goblin archetypes. Cosmetic tint plus one stat each (Lucky loot, Banker keeps cash).
+const CHARS = {
+  fresh: { name: 'The Fresh', tint: new THREE.Color(0x2b2b30), pileMult: 1, keepOnDeath: false },
+  lucky: { name: 'The Lucky', tint: new THREE.Color(0x2e5a2a), pileMult: 1.5, keepOnDeath: false },
+  degenerate: { name: 'The Degenerate', tint: new THREE.Color(0x5a1f5a), pileMult: 1, keepOnDeath: false },
+  banker: { name: 'The Banker', tint: new THREE.Color(0x1f3a5a), pileMult: 1, keepOnDeath: true },
+};
+
+// Grenades are bought at a kiosk with G and thrown with right-click.
+const GREN_PRICE = 500;
+const GREN_MAX = 3;
+const GREN_FUSE = 1.5;
+const GREN_RADIUS = 4.5;
+const GREN_DMG = 100;
+
+// Final Circle (Battle Royale only): closes in from ZONE_START, players outside take damage.
+const ZONE_START = 180;
+const ZONE_SHRINK = 240;
+const ZONE_END = 6;
+const ZONE_DPS = 8;
+
 const REDEEM = [
   { x: 0, z: 0 }, { x: -16, z: 10 }, { x: 17, z: -11 }, { x: -17, z: -14 },
 ];
@@ -236,6 +257,30 @@ function syncFigures(ents) {
   }
 }
 
+function syncShots(list) {
+  const seen = new Set();
+  for (const p of list) {
+    seen.add(p.id);
+    let m = shotMeshes.get(p.id);
+    if (!m) {
+      m = new THREE.Mesh(
+        new THREE.SphereGeometry(0.3, 10, 8),
+        new THREE.MeshStandardMaterial({ color: 0x6fdc4a, emissive: 0x2a5a10 }),
+      );
+      scene.add(m);
+      shotMeshes.set(p.id, m);
+    }
+    m.position.set(p.x, p.y, p.z);
+  }
+  for (const [id, m] of shotMeshes) {
+    if (seen.has(id)) continue;
+    scene.remove(m);
+    m.geometry.dispose();
+    m.material.dispose();
+    shotMeshes.delete(id);
+  }
+}
+
 function syncPiles(list) {
   const seen = new Set();
   for (const p of list) {
@@ -261,6 +306,20 @@ function syncPiles(list) {
 
 // ---------- Shared game state ----------
 let isHost = false;
+let pickedChar = 'fresh';     // my goblin in the lobby
+let elapsed = 0;              // host: seconds since the match started
+let projectiles = [];         // host: live grenades
+let nextProjId = 1;
+const shotMeshes = new Map();  // grenade id -> mesh
+const zoneRing = new THREE.Mesh(
+  new THREE.RingGeometry(0.97, 1, 160),
+  new THREE.MeshBasicMaterial({ color: 0xff4a3a, transparent: true, opacity: 0.7 }),
+);
+zoneRing.rotation.x = -Math.PI / 2;
+zoneRing.position.y = 0.05;
+zoneRing.visible = false;
+scene.add(zoneRing);
+
 let phase = 'lobby';          // host truth: 'lobby' | 'playing' | 'over'
 let mode = 'br';              // 'br' | 'koth'
 let myId = null;
@@ -289,10 +348,11 @@ let mouseDown = false;
 const keys = {};
 
 // ---------- Entities (host) ----------
-function makeEntity(id, name, bot, conn, slot) {
+function makeEntity(id, name, bot, conn, slot, char) {
   const sp = spawnPoint(slot);
   return {
-    id, name, bot, conn,
+    id, name, bot, conn, char,
+    nades: 0,
     x: sp.x, z: sp.z, sx: sp.x, sz: sp.z, yaw: sp.yaw,
     cash: 0, hp: MAX_HP, tier: -1, alive: true, rs: 0, cd: 0,
     goal: null, thinkT: 0, wander: null, strafe: 1, strafeT: 0,
@@ -357,6 +417,82 @@ function tryRedeem(e) {
   notify(e, `Redeemed for ${TIERS[k].name}`);
 }
 
+function randomChar() {
+  const keys = Object.keys(CHARS);
+  return keys[Math.floor(Math.random() * keys.length)];
+}
+
+function buyGrenade(e) {
+  if (!e.alive || !nearCenter(e.x, e.z)) return;
+  if (e.nades >= GREN_MAX) {
+    notify(e, 'Grenade pouch is full');
+    return;
+  }
+  if (e.cash < GREN_PRICE) {
+    notify(e, 'Not enough cash for a grenade');
+    return;
+  }
+  e.cash -= GREN_PRICE;
+  e.nades += 1;
+  notify(e, 'Bought a grenade');
+}
+
+function throwGrenade(e, d) {
+  if (!e.alive || e.nades <= 0) return;
+  e.nades -= 1;
+  projectiles.push({
+    id: nextProjId++, owner: e.id,
+    x: e.x, y: 1.5, z: e.z,
+    vx: d[0] * 16, vy: d[1] * 16 + 4, vz: d[2] * 16,
+    t: GREN_FUSE, done: false,
+  });
+}
+
+function explode(p) {
+  const owner = entities.find((e) => e.id === p.owner) || null;
+  for (const e of entities) {
+    if (!e.alive) continue;
+    const d = Math.hypot(e.x - p.x, e.z - p.z);
+    if (d < GREN_RADIUS) applyDamage(e, GREN_DMG * (1 - d / GREN_RADIUS), owner);
+  }
+}
+
+function stepGrenades(dt) {
+  for (const p of projectiles) {
+    p.vy -= 18 * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.z += p.vz * dt;
+    if (p.y <= 0) {
+      p.y = 0;
+      p.vx = 0;
+      p.vy = 0;
+      p.vz = 0;
+    }
+    p.t -= dt;
+    if (p.t <= 0) {
+      p.done = true;
+      explode(p);
+    }
+  }
+  projectiles = projectiles.filter((p) => !p.done);
+}
+
+// Final Circle radius, or null when there is no circle
+function zoneRadius() {
+  if (mode !== 'br' || elapsed < ZONE_START) return null;
+  const k = Math.min(1, (elapsed - ZONE_START) / ZONE_SHRINK);
+  return ROOM + (ZONE_END - ROOM) * k;
+}
+
+function applyZone(dt) {
+  const r = zoneRadius();
+  if (r === null) return;
+  for (const e of entities) {
+    if (e.alive && Math.hypot(e.x, e.z) > r) applyDamage(e, ZONE_DPS * dt, null);
+  }
+}
+
 function applyDamage(t, dmg, killer) {
   if (!t.alive) return;
   t.hp -= dmg;
@@ -364,23 +500,28 @@ function applyDamage(t, dmg, killer) {
 }
 
 function kill(v, k) {
-  const loot = v.cash;
-  k.cash += loot;
-  v.cash = 0;
+  // The Banker keeps their cash, so the killer gets nothing
+  const keeps = CHARS[v.char].keepOnDeath;
+  const loot = keeps || !k ? 0 : v.cash;
+  if (k) k.cash += loot;
+  if (!keeps) v.cash = 0;
   v.tier = -1;
+  v.nades = 0;
   v.hp = 0;
   v.alive = false;
   v.rs = mode === 'koth' ? RESPAWN_TIME : Infinity;
-  pushFeed(`${k.name} eliminated ${v.name}${loot ? ` and took $${fmt(loot)}` : ''}`);
-  notify(k, `Eliminated ${v.name}${loot ? ` (+$${fmt(loot)})` : ''}`);
-  notify(v, `Eliminated by ${k.name}`);
+  const by = k ? k.name : 'The Final Circle';
+  pushFeed(`${by} eliminated ${v.name}${loot ? ` and took $${fmt(loot)}` : ''}`);
+  if (k) notify(k, `Eliminated ${v.name}${loot ? ` (+$${fmt(loot)})` : ''}`);
+  notify(v, `Eliminated by ${by}`);
 }
 
 function respawn(e) {
   e.alive = true;
   e.hp = MAX_HP;
-  e.cash = 0;
+  if (!CHARS[e.char].keepOnDeath) e.cash = 0;
   e.tier = -1;
+  e.nades = 0;
   e.x = e.sx;
   e.z = e.sz;
   e.yaw = yawToward(e.sx, e.sz);
@@ -571,7 +712,7 @@ function collectPiles() {
     for (const e of entities) {
       if (!e.alive) continue;
       if (Math.hypot(e.x - p.x, e.z - p.z) < 1.1) {
-        e.cash += p.amt;
+        e.cash += Math.round(p.amt * CHARS[e.char].pileMult);
         piles[i] = randomPile();
         break;
       }
@@ -606,6 +747,9 @@ function simulate(dt) {
     if (e.bot) botTick(e, dt);
   }
   collectPiles();
+  elapsed += dt;
+  applyZone(dt);
+  stepGrenades(dt);
 
   if (mode === 'koth') {
     timeLeft -= dt;
@@ -628,13 +772,15 @@ function buildSnapshot() {
     total: entities.length,
     winner: winnerText,
     feed: feed.slice(-5),
+    zone: zoneRadius(),
     ents: entities.map((e) => ({
-      id: e.id, name: e.name, bot: e.bot,
+      id: e.id, name: e.name, bot: e.bot, char: e.char,
       x: e.x, z: e.z, yaw: e.yaw,
-      cash: e.cash, hp: e.hp, tier: e.tier, alive: e.alive,
+      cash: e.cash, hp: e.hp, tier: e.tier, nades: e.nades, alive: e.alive,
       rs: isFinite(e.rs) ? Math.ceil(e.rs) : 0,
     })),
     piles: piles.map((p) => ({ id: p.id, x: p.x, z: p.z, amt: p.amt })),
+    shots: projectiles.map((p) => ({ id: p.id, x: p.x, y: p.y, z: p.z })),
   };
 }
 
@@ -655,6 +801,9 @@ function setState(s) {
   myEnt = s.ents.find((e) => e.id === myId) || null;
   syncFigures(s.ents);
   syncPiles(s.piles);
+  syncShots(s.shots || []);
+  zoneRing.visible = s.zone !== null && s.zone !== undefined;
+  if (zoneRing.visible) zoneRing.scale.setScalar(s.zone);
   if (!isHost && myEnt) {
     // Adopt the server's position when dead, respawned, or far off
     if (!myEnt.alive || Math.hypot(me.x - myEnt.x, me.z - myEnt.z) > 3) {
@@ -724,7 +873,7 @@ function onHostData(conn, m) {
       conn.send({ t: 'reject', text: 'Room is full' });
       return;
     }
-    lobby.set(conn.peer, { name: cleanName(m.name), conn });
+    lobby.set(conn.peer, { name: cleanName(m.name), char: CHARS[m.char] ? m.char : 'fresh', conn });
     broadcastLobby();
     return;
   }
@@ -733,6 +882,8 @@ function onHostData(conn, m) {
   if (m.t === 'in') onInput(e, m);
   else if (m.t === 'fire') fire(e, m.d);
   else if (m.t === 'buy') tryRedeem(e);
+  else if (m.t === 'grenade') buyGrenade(e);
+  else if (m.t === 'throw') throwGrenade(e, m.d);
 }
 
 function onInput(e, m) {
@@ -760,17 +911,19 @@ function startMatch() {
   mode = $('mode').value;
   phase = 'playing';
   timeLeft = KOTH_TIME;
+  elapsed = 0;
+  projectiles = [];
   winnerText = '';
   feed = [];
   const order = shuffle([...Array(MAX_PLAYERS).keys()]);
   let slot = 0;
-  hostEntity = makeEntity(myId, hostName, false, null, order[slot++]);
+  hostEntity = makeEntity(myId, hostName, false, null, order[slot++], pickedChar);
   entities = [hostEntity];
   for (const [id, p] of lobby) {
-    entities.push(makeEntity(id, p.name, false, p.conn, order[slot++]));
+    entities.push(makeEntity(id, p.name, false, p.conn, order[slot++], p.char));
   }
   for (let b = 1; entities.length < MAX_PLAYERS; b++) {
-    entities.push(makeEntity(`bot${b}`, `Bot ${pad2(b)}`, true, null, order[slot++]));
+    entities.push(makeEntity(`bot${b}`, `Bot ${pad2(b)}`, true, null, order[slot++], randomChar()));
   }
   piles = [];
   for (let i = 0; i < PILE_COUNT; i++) piles.push(randomPile());
@@ -794,7 +947,7 @@ function joinGame() {
     myId = id;
     hostConn = peer.connect(`PR-${code}`, { reliable: true });
     hostConn.on('open', () => {
-      hostConn.send({ t: 'join', name: hostName });
+      hostConn.send({ t: 'join', name: hostName, char: pickedChar });
       $('status').textContent = 'Joined. Waiting for the host to start...';
     });
     hostConn.on('data', onClientData);
@@ -915,15 +1068,18 @@ function updateHud() {
 
   $('hud-mode').textContent = state.mode === 'koth' ? 'King of the Hill' : 'Battle Royale';
   $('hud-time').textContent = state.mode === 'koth' ? fmtTime(state.timeLeft) : `${state.alive} alive`;
-  $('hud-alive').textContent = `${state.alive} / ${state.total} standing`;
+  const zr = state.zone;
+  $('hud-alive').textContent = `${state.alive} / ${state.total} standing`
+    + (zr !== null && zr !== undefined ? ` · circle ${Math.round(zr)}m` : '');
 
   $('cash').textContent = `$${fmt(s.cash)}`;
   $('hud-hp').style.width = `${clamp(s.hp, 0, MAX_HP)}%`;
   const cur = s.tier >= 0 ? TIERS[s.tier].name : 'Unarmed';
   const nxt = nextBuy(s.cash, s.tier);
-  $('hud-weapon').textContent = s.tier + 1 < TIERS.length
+  const upgrade = s.tier + 1 < TIERS.length
     ? `${cur} · next ${TIERS[s.tier + 1].name} $${fmt(TIERS[s.tier + 1].price)}`
     : `${cur} · max`;
+  $('hud-weapon').textContent = `${upgrade} · grenades ${s.nades || 0}`;
 
   const seen = state.ents.filter((e) => e.alive && e.id !== myId && (!s.alive || e.cash > s.cash)).length;
   $('hud-seen').textContent = `Visible richer players: ${seen}`;
@@ -932,9 +1088,10 @@ function updateHud() {
   const prompt = $('prompt');
   if (s.alive && nearCenter(me.x, me.z)) {
     prompt.classList.remove('hidden');
-    prompt.textContent = nxt >= 0
+    const upgradeText = nxt >= 0
       ? `E · redeem for ${TIERS[nxt].name} ($${fmt(TIERS[nxt].price)})`
       : 'E · not enough cash to upgrade';
+    prompt.textContent = `${upgradeText}  |  G · grenade $${GREN_PRICE}`;
   } else {
     prompt.classList.add('hidden');
   }
@@ -984,7 +1141,7 @@ function renderFigures(dt) {
 
     // Richer players read as brighter and bigger
     const rich = Math.min(1, e.cash / 8000);
-    f.mat.color.lerpColors(SUIT_POOR, SUIT_RICH, rich);
+    f.mat.color.lerpColors(CHARS[e.char].tint, SUIT_RICH, rich);
     f.mat.emissive.setRGB(rich * 0.35, rich * 0.28, 0);
     f.group.scale.setScalar(1 + rich * 0.08);
     f.crown.visible = e.cash >= CROWN_CASH;
@@ -1064,15 +1221,38 @@ document.addEventListener('keydown', (e) => {
     if (isHost) tryRedeem(hostEntity);
     else if (hostConn) hostConn.send({ t: 'buy' });
   }
+  if (e.code === 'KeyG' && !e.repeat && state && state.phase === 'playing') {
+    if (isHost) buyGrenade(hostEntity);
+    else if (hostConn) hostConn.send({ t: 'grenade' });
+  }
 });
 document.addEventListener('keyup', (e) => {
   keys[e.code] = false;
 });
 document.addEventListener('mousedown', (e) => {
+  if (e.button === 2) {
+    throwNow();
+    return;
+  }
   if (e.button !== 0) return;
   mouseDown = true;
   if (!document.pointerLockElement && state) lockPointer();
 });
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+document.querySelectorAll('#chars button').forEach((b) => {
+  b.addEventListener('click', () => {
+    pickedChar = b.dataset.char;
+    document.querySelectorAll('#chars button').forEach((x) => x.classList.toggle('sel', x === b));
+  });
+});
+
+function throwNow() {
+  const s = self();
+  if (!s || !s.alive || !s.nades || !state || state.phase !== 'playing') return;
+  if (isHost) throwGrenade(hostEntity, aimDir());
+  else if (hostConn) hostConn.send({ t: 'throw', d: aimDir() });
+}
 document.addEventListener('mouseup', (e) => {
   if (e.button === 0) mouseDown = false;
 });

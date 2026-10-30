@@ -29,6 +29,11 @@
   #players { font-size: 13px; margin: 8px 0 0; padding-left: 18px; max-height: 120px; overflow: auto; }
   .hr { border: 0; border-top: 1px solid #2c2c33; margin: 18px 0 0; }
 
+  .chars { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .chars button { background: #0d0d0f; color: var(--paper); border-color: #3a3a42; font-weight: 600; text-align: left; font-size: 13px; }
+  .chars button.sel { border-color: var(--gold); color: var(--gold); }
+  .chars small { display: block; font-weight: 400; opacity: 0.6; font-size: 11px; }
+
   /* HUD */
   #hud { position: fixed; inset: 0; pointer-events: none; }
   .corner { position: absolute; background: rgba(13,13,15,0.6); border: 1px solid #2c2c33; border-radius: 8px; padding: 10px 14px; font-size: 14px; }
@@ -82,6 +87,14 @@
 
     <label for="name">Your name</label>
     <input id="name" maxlength="16" placeholder="Player" autocomplete="off">
+
+    <label>Your goblin</label>
+    <div id="chars" class="chars">
+      <button data-char="fresh" class="sel">The Fresh<small>Starter</small></button>
+      <button data-char="lucky">The Lucky<small>Rare · bigger cash piles</small></button>
+      <button data-char="degenerate">The Degenerate<small>Epic</small></button>
+      <button data-char="banker">The Banker<small>Legendary · keeps cash on death</small></button>
+    </div>
 
     <div class="row" style="margin-top:18px">
       <button id="host-btn">Host a match</button>
